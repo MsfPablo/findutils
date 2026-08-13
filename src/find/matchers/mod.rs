@@ -65,7 +65,7 @@ use ls::Ls;
 use std::{
     error::Error,
     fs::{File, Metadata},
-    io::Read,
+    io::{BufRead, BufReader},
     path::Path,
     str::FromStr,
     time::SystemTime,
@@ -1022,35 +1022,40 @@ fn build_matcher_tree(
 // eg. find -files0-from rust.txt -name "cargo"
 fn parse_files0_args(config: &mut Config) -> Result<(), Box<dyn Error>> {
     let mode = config.files0_argument.as_ref().unwrap();
-    let mut buffer = Vec::new();
     let new_paths = config.new_paths.insert(Vec::new());
 
-    if mode == "-" {
-        std::io::stdin().read_to_end(&mut buffer)?;
+    let mut reader: Box<dyn BufRead> = if mode == "-" {
+        Box::new(BufReader::new(std::io::stdin()))
     } else {
-        let mut file =
+        let file =
             File::open(mode).map_err(|e| format!("cannot open '{}' for reading: {}", mode, e))?;
-        file.read_to_end(&mut buffer)?;
+        Box::new(BufReader::new(file))
+    };
+
+    // Read one NUL-terminated name at a time so that an endless or very large
+    // input (e.g. `-files0-from /dev/urandom`) is rejected as soon as the first
+    // invalid name is seen, instead of being buffered in full first.
+    let mut segment = Vec::new();
+    let mut reported_zero_length = false;
+    loop {
+        segment.clear();
+        if reader.read_until(0, &mut segment)? == 0 {
+            break;
+        }
+        if segment.last() == Some(&0) {
+            segment.pop();
+        }
+        // empty starting point checker
+        if segment.is_empty() {
+            if !reported_zero_length {
+                eprintln!("find: invalid zero-length file name");
+                reported_zero_length = true;
+            }
+            continue;
+        }
+        new_paths.push(std::str::from_utf8(&segment)?.to_string());
     }
 
-    let mut buffer_split: Vec<&[u8]> = buffer.split(|&b| b == 0).collect();
-    // if the pipe/file ends with ASCII NULL
-    if buffer_split.last().is_some_and(|s| s.is_empty()) {
-        buffer_split.remove(buffer_split.len() - 1);
-    }
-
-    let mut string_segments: Vec<String> = buffer_split
-        .iter()
-        .map(|segment| std::str::from_utf8(segment).map(std::string::ToString::to_string))
-        .collect::<Result<_, _>>()?;
-    // empty starting point checker
-    if string_segments.iter().any(std::string::String::is_empty) {
-        eprintln!("find: invalid zero-length file name");
-        // remove the empty ones so as to avoid file not found error
-        string_segments.retain(|s| !s.is_empty());
-    }
-
-    new_paths.extend(string_segments);
     Ok(())
 }
 

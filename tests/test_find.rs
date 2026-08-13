@@ -237,6 +237,40 @@ fn files0_pipe_double_nul() {
         .stdout_contains("./test_data/");
 }
 
+/// Names are consumed incrementally, so an input whose first name is invalid is
+/// rejected without the rest of it ever being read into memory (see issue #779).
+#[test]
+fn files0_invalid_utf8_rejected_before_reading_rest() {
+    let temp_dir = Builder::new().prefix("find_files0_").tempdir().unwrap();
+    let path_list = temp_dir.path().join("paths0");
+
+    let mut input = b"\xff\0".to_vec();
+    input.extend(std::iter::repeat_n(b'x', 8 * 1024 * 1024));
+    fs::write(&path_list, input).expect("wrote path list");
+
+    ucmd()
+        .arg("-files0-from")
+        .arg(path_list)
+        .fails()
+        .stderr_contains("invalid utf-8 sequence")
+        .no_stdout();
+}
+
+#[test]
+fn files0_many_entries_streamed() {
+    let mut input = Vec::new();
+    for _ in 0..1000 {
+        input.extend_from_slice(b"./test_data/simple\0");
+    }
+
+    ucmd()
+        .args(&["-files0-from", "-"])
+        .pipe_in(input)
+        .succeeds()
+        .no_stderr()
+        .stdout_contains("./test_data/simple/abbbc");
+}
+
 #[test]
 fn files0_no_file() {
     #[cfg(unix)]
